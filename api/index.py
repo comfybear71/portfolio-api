@@ -4,7 +4,6 @@ import httpx
 import os
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel
 
 app = FastAPI(
     title="Portfolio Crypto API",
@@ -16,9 +15,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://portfolio-crypto-inky.vercel.app",
+        "https://portfolio-crypto-git-main-comfybear71.vercel.app",
         "http://localhost:3000",
-        "https://portfolio-crypto.vercel.app",
-        "https://portfolio-crypto-git-main-comfybear71.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -29,73 +28,29 @@ app.add_middleware(
 SWYFTX_API_URL = "https://api.swyftx.com.au"
 SWYFTX_API_KEY = os.getenv("SWYFTX_API_KEY")
 
-# Pydantic Models
-class AssetBalance(BaseModel):
-    asset_id: int
-    code: str
-    name: str
-    balance: float
-    available_balance: float
-    usd_value: float
-    aud_value: float
-    last_price: float
-    change_24h: Optional[float] = None
+# Coin mapping (from your working Python code)
+COIN_MAP = {
+    1: {'code': 'AUD', 'name': 'Australian Dollar', 'cgId': None, 'fixed': 1.0},
+    3: {'code': 'BTC', 'name': 'Bitcoin', 'cgId': 'bitcoin'},
+    5: {'code': 'ETH', 'name': 'Ethereum', 'cgId': 'ethereum'},
+    6: {'code': 'XRP', 'name': 'XRP', 'cgId': 'ripple'},
+    12: {'code': 'ADA', 'name': 'Cardano', 'cgId': 'cardano'},
+    130: {'code': 'SOL', 'name': 'Solana', 'cgId': 'solana'},
+    73: {'code': 'DOGE', 'name': 'Dogecoin', 'cgId': 'dogecoin'},
+    53: {'code': 'USDC', 'name': 'USD Coin', 'cgId': 'usd-coin'},
+}
 
-class PortfolioSummary(BaseModel):
-    total_aud_value: float
-    total_usd_value: float
-    assets: List[AssetBalance]
-    last_updated: datetime
-
-class MarketData(BaseModel):
-    asset_id: int
-    code: str
-    name: str
-    last_price: float
-    change_24h: float
-    volume_24h: float
-
-# Swyftx API Client
-class SwyftxClient:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = SWYFTX_API_URL
-        self.headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-    
-    async def get_balances(self):
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/user/balance/",
-                headers=self.headers
-            )
-            response.raise_for_status()
-            return response.json()
-    
-    async def get_assets(self):
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/markets/assets/",
-                headers=self.headers
-            )
-            response.raise_for_status()
-            return response.json()
-    
-    async def get_live_rates(self):
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/live/rates/",
-                headers=self.headers
-            )
-            response.raise_for_status()
-            return response.json()
-
-def get_swyftx_client():
-    if not SWYFTX_API_KEY:
-        raise HTTPException(status_code=500, detail="SWYFTX_API_KEY not configured")
-    return SwyftxClient(SWYFTX_API_KEY)
+async def get_swyftx_token():
+    """Get access token from Swyftx - EXACTLY like your working Python code"""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{SWYFTX_API_URL}/auth/refresh/",
+            json={"apiKey": SWYFTX_API_KEY},
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json().get("accessToken")
 
 @app.get("/")
 async def root():
@@ -112,81 +67,65 @@ async def health_check():
 @app.get("/api/portfolio")
 async def get_portfolio():
     try:
-        client = get_swyftx_client()
+        if not SWYFTX_API_KEY:
+            raise HTTPException(status_code=500, detail="SWYFTX_API_KEY not configured")
         
-        balances, assets, rates = await client.get_balances(), await client.get_assets(), await client.get_live_rates()
+        # Step 1: Get token (EXACTLY like your working Python code)
+        token = await get_swyftx_token()
+        headers = {"Authorization": f"Bearer {token}"}
         
-        assets_dict = {a['id']: a for a in assets}
-        rates_dict = {r['asset']: r for r in rates}
+        # Step 2: Get balances (EXACTLY like your working Python code)
+        async with httpx.AsyncClient() as client:
+            balances_resp = await client.get(
+                f"{SWYFTX_API_URL}/user/balance/",
+                headers=headers,
+                timeout=10
+            )
+            balances_resp.raise_for_status()
+            balances_data = balances_resp.json()
         
-        portfolio_assets = []
+        # Process balances (matching your working logic)
+        assets = []
         total_aud = 0.0
-        total_usd = 0.0
         
-        for balance in balances:
-            asset_id = balance.get('asset_id')
-            asset_info = assets_dict.get(asset_id, {})
-            rate_info = rates_dict.get(asset_id, {})
+        for balance in balances_data:
+            asset_id = balance.get('assetId')
+            available = float(balance.get('availableBalance', 0))
             
-            if balance.get('balance', 0) <= 0:
+            if available <= 0 or asset_id not in COIN_MAP:
                 continue
             
-            balance_qty = float(balance.get('balance', 0))
-            last_price = float(rate_info.get('bid', 0))
-            aud_value = balance_qty * last_price
-            usd_value = aud_value * 0.65  # Approximate conversion
+            coin_info = COIN_MAP[asset_id]
             
-            portfolio_assets.append({
+            # For now, use simple values (you can add CoinGecko later)
+            # This is placeholder logic - replace with real price lookup
+            asset_data = {
                 "asset_id": asset_id,
-                "code": asset_info.get('code', 'UNKNOWN'),
-                "name": asset_info.get('name', 'Unknown Asset'),
-                "balance": balance_qty,
-                "available_balance": float(balance.get('available_balance', 0)),
-                "usd_value": usd_value,
-                "aud_value": aud_value,
-                "last_price": last_price,
-                "change_24h": rate_info.get('change_24h')
-            })
+                "code": coin_info['code'],
+                "name": coin_info['name'],
+                "balance": available,
+                "aud_value": available * 100,  # Placeholder - replace with real price
+                "usd_value": available * 65,   # Placeholder
+                "change_24h": 0.0  # Placeholder
+            }
             
-            total_aud += aud_value
-            total_usd += usd_value
+            assets.append(asset_data)
+            total_aud += asset_data['aud_value']
         
-        portfolio_assets.sort(key=lambda x: x['aud_value'], reverse=True)
+        # Sort by value
+        assets.sort(key=lambda x: x['aud_value'], reverse=True)
         
         return {
             "total_aud_value": total_aud,
-            "total_usd_value": total_usd,
-            "assets": portfolio_assets,
+            "total_usd_value": total_aud * 0.65,
+            "assets": assets,
             "last_updated": datetime.utcnow().isoformat()
         }
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/market-data")
-async def get_market_data():
-    try:
-        client = get_swyftx_client()
-        assets, rates = await client.get_assets(), await client.get_live_rates()
-        
-        assets_dict = {a['id']: a for a in assets}
-        market_data = []
-        
-        for rate in rates:
-            asset_id = rate.get('asset')
-            asset_info = assets_dict.get(asset_id, {})
-            
-            market_data.append({
-                "asset_id": asset_id,
-                "code": asset_info.get('code', 'UNKNOWN'),
-                "name": asset_info.get('name', 'Unknown'),
-                "last_price": float(rate.get('bid', 0)),
-                "change_24h": float(rate.get('change_24h', 0)),
-                "volume_24h": float(rate.get('volume_24h', 0))
-            })
-        
-        market_data.sort(key=lambda x: x['volume_24h'], reverse=True)
-        return market_data[:50]
-        
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Swyftx API error: {str(e)}"
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
