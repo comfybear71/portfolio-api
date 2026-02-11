@@ -1,11 +1,9 @@
-# index.py
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import httpx
 import os
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -19,23 +17,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://portfolio-crypto.vercel.app",  # Your frontend URL
-        "https://portfolio-crypto-git-main-yourusername.vercel.app"  # Preview deployments
+        "https://portfolio-crypto.vercel.app",
+        "https://portfolio-crypto-git-main-comfybear71.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Security
-security = HTTPBearer()
-
 # Swyftx API Configuration
 SWYFTX_API_URL = "https://api.swyftx.com.au"
 SWYFTX_API_KEY = os.getenv("SWYFTX_API_KEY")
-
-if not SWYFTX_API_KEY:
-    raise ValueError("SWYFTX_API_KEY environment variable not set")
 
 # Pydantic Models
 class AssetBalance(BaseModel):
@@ -61,7 +53,6 @@ class MarketData(BaseModel):
     name: str
     last_price: float
     change_24h: float
-    change_7d: Optional[float] = None
     volume_24h: float
 
 # Swyftx API Client
@@ -74,8 +65,7 @@ class SwyftxClient:
             "Content-Type": "application/json"
         }
     
-    async def get_balances(self) -> List[Dict]:
-        """Fetch user balances from Swyftx"""
+    async def get_balances(self):
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.base_url}/user/balance/",
@@ -84,8 +74,7 @@ class SwyftxClient:
             response.raise_for_status()
             return response.json()
     
-    async def get_assets(self) -> List[Dict]:
-        """Fetch all available assets/markets"""
+    async def get_assets(self):
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.base_url}/markets/assets/",
@@ -94,8 +83,7 @@ class SwyftxClient:
             response.raise_for_status()
             return response.json()
     
-    async def get_live_rates(self) -> List[Dict]:
-        """Fetch live market rates"""
+    async def get_live_rates(self):
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.base_url}/live/rates/",
@@ -104,11 +92,10 @@ class SwyftxClient:
             response.raise_for_status()
             return response.json()
 
-# Dependency
 def get_swyftx_client():
+    if not SWYFTX_API_KEY:
+        raise HTTPException(status_code=500, detail="SWYFTX_API_KEY not configured")
     return SwyftxClient(SWYFTX_API_KEY)
-
-# API Routes
 
 @app.get("/")
 async def root():
@@ -122,22 +109,13 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
-@app.get("/api/portfolio", response_model=PortfolioSummary)
-async def get_portfolio(client: SwyftxClient = Depends(get_swyftx_client)):
-    """
-    Get complete portfolio data including balances and current values
-    """
+@app.get("/api/portfolio")
+async def get_portfolio():
     try:
-        # Fetch data concurrently
-        balances_task = client.get_balances()
-        assets_task = client.get_assets()
-        rates_task = client.get_live_rates()
+        client = get_swyftx_client()
         
-        balances, assets, rates = await asyncio.gather(
-            balances_task, assets_task, rates_task
-        )
+        balances, assets, rates = await client.get_balances(), await client.get_assets(), await client.get_live_rates()
         
-        # Create lookup dictionaries
         assets_dict = {a['id']: a for a in assets}
         rates_dict = {r['asset']: r for r in rates}
         
@@ -150,136 +128,65 @@ async def get_portfolio(client: SwyftxClient = Depends(get_swyftx_client)):
             asset_info = assets_dict.get(asset_id, {})
             rate_info = rates_dict.get(asset_id, {})
             
-            # Skip zero balances
             if balance.get('balance', 0) <= 0:
                 continue
             
-            # Calculate values
             balance_qty = float(balance.get('balance', 0))
             last_price = float(rate_info.get('bid', 0))
             aud_value = balance_qty * last_price
+            usd_value = aud_value * 0.65  # Approximate conversion
             
-            # Get USD value (approximate using rate or separate call)
-            usd_rate = float(rate_info.get('bid_usd', last_price * 0.65))  # Fallback conversion
-            usd_value = balance_qty * usd_rate
+            portfolio_assets.append({
+                "asset_id": asset_id,
+                "code": asset_info.get('code', 'UNKNOWN'),
+                "name": asset_info.get('name', 'Unknown Asset'),
+                "balance": balance_qty,
+                "available_balance": float(balance.get('available_balance', 0)),
+                "usd_value": usd_value,
+                "aud_value": aud_value,
+                "last_price": last_price,
+                "change_24h": rate_info.get('change_24h')
+            })
             
-            asset_data = AssetBalance(
-                asset_id=asset_id,
-                code=asset_info.get('code', 'UNKNOWN'),
-                name=asset_info.get('name', 'Unknown Asset'),
-                balance=balance_qty,
-                available_balance=float(balance.get('available_balance', 0)),
-                usd_value=usd_value,
-                aud_value=aud_value,
-                last_price=last_price,
-                change_24h=rate_info.get('change_24h')
-            )
-            
-            portfolio_assets.append(asset_data)
             total_aud += aud_value
             total_usd += usd_value
         
-        # Sort by value (highest first)
-        portfolio_assets.sort(key=lambda x: x.aud_value, reverse=True)
+        portfolio_assets.sort(key=lambda x: x['aud_value'], reverse=True)
         
-        return PortfolioSummary(
-            total_aud_value=total_aud,
-            total_usd_value=total_usd,
-            assets=portfolio_assets,
-            last_updated=datetime.utcnow()
-        )
+        return {
+            "total_aud_value": total_aud,
+            "total_usd_value": total_usd,
+            "assets": portfolio_assets,
+            "last_updated": datetime.utcnow().isoformat()
+        }
         
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"Swyftx API error: {str(e)}"
-        )
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/market-data", response_model=List[MarketData])
-async def get_market_data(client: SwyftxClient = Depends(get_swyftx_client)):
-    """
-    Get current market data for all tracked assets
-    """
+@app.get("/api/market-data")
+async def get_market_data():
     try:
-        assets, rates = await asyncio.gather(
-            client.get_assets(),
-            client.get_live_rates()
-        )
+        client = get_swyftx_client()
+        assets, rates = await client.get_assets(), await client.get_live_rates()
         
-        rates_dict = {r['asset']: r for r in rates}
         assets_dict = {a['id']: a for a in assets}
-        
         market_data = []
+        
         for rate in rates:
             asset_id = rate.get('asset')
             asset_info = assets_dict.get(asset_id, {})
             
-            market_data.append(MarketData(
-                asset_id=asset_id,
-                code=asset_info.get('code', 'UNKNOWN'),
-                name=asset_info.get('name', 'Unknown'),
-                last_price=float(rate.get('bid', 0)),
-                change_24h=float(rate.get('change_24h', 0)),
-                change_7d=rate.get('change_7d'),
-                volume_24h=float(rate.get('volume_24h', 0))
-            ))
+            market_data.append({
+                "asset_id": asset_id,
+                "code": asset_info.get('code', 'UNKNOWN'),
+                "name": asset_info.get('name', 'Unknown'),
+                "last_price": float(rate.get('bid', 0)),
+                "change_24h": float(rate.get('change_24h', 0)),
+                "volume_24h": float(rate.get('volume_24h', 0))
+            })
         
-        # Sort by volume (most traded first)
-        market_data.sort(key=lambda x: x.volume_24h, reverse=True)
-        return market_data[:50]  # Return top 50 by volume
+        market_data.sort(key=lambda x: x['volume_24h'], reverse=True)
+        return market_data[:50]
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/asset/{asset_code}")
-async def get_asset_details(
-    asset_code: str,
-    client: SwyftxClient = Depends(get_swyftx_client)
-):
-    """
-    Get detailed information for a specific asset
-    """
-    try:
-        assets = await client.get_assets()
-        rates = await client.get_live_rates()
-        
-        # Find asset by code (case insensitive)
-        asset = next(
-            (a for a in assets if a['code'].upper() == asset_code.upper()),
-            None
-        )
-        
-        if not asset:
-            raise HTTPException(status_code=404, detail="Asset not found")
-        
-        rate = next(
-            (r for r in rates if r['asset'] == asset['id']),
-            {}
-        )
-        
-        return {
-            "asset_id": asset['id'],
-            "code": asset['code'],
-            "name": asset['name'],
-            "type": asset.get('type'),
-            "current_price_aud": rate.get('bid'),
-            "current_price_usd": rate.get('bid_usd'),
-            "change_24h": rate.get('change_24h'),
-            "change_7d": rate.get('change_7d'),
-            "high_24h": rate.get('high_24h'),
-            "low_24h": rate.get('low_24h'),
-            "volume_24h": rate.get('volume_24h')
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# For Vercel serverless deployment
-import asyncio
