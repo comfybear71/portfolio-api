@@ -28,29 +28,33 @@ app.add_middleware(
 SWYFTX_API_URL = "https://api.swyftx.com.au"
 SWYFTX_API_KEY = os.getenv("SWYFTX_API_KEY")
 
-# Coin mapping (from your working Python code)
+# Complete coin mapping from your working Telegram bot
 COIN_MAP = {
-    1: {'code': 'AUD', 'name': 'Australian Dollar', 'cgId': None, 'fixed': 1.0},
-    3: {'code': 'BTC', 'name': 'Bitcoin', 'cgId': 'bitcoin'},
-    5: {'code': 'ETH', 'name': 'Ethereum', 'cgId': 'ethereum'},
-    6: {'code': 'XRP', 'name': 'XRP', 'cgId': 'ripple'},
-    12: {'code': 'ADA', 'name': 'Cardano', 'cgId': 'cardano'},
-    130: {'code': 'SOL', 'name': 'Solana', 'cgId': 'solana'},
-    73: {'code': 'DOGE', 'name': 'Dogecoin', 'cgId': 'dogecoin'},
-    53: {'code': 'USDC', 'name': 'USD Coin', 'cgId': 'usd-coin'},
+    1: ('AUD', 'aud', 1.0),
+    3: ('BTC', 'bitcoin', None),
+    5: ('ETH', 'ethereum', None),
+    6: ('XRP', 'ripple', None),
+    12: ('ADA', 'cardano', None),
+    36: ('USD', 'usd', 1.0),
+    53: ('USDC', 'usd-coin', None),
+    73: ('DOGE', 'dogecoin', None),
+    130: ('SOL', 'solana', None),
+    405: ('LUNA', 'terra-luna', None),
+    407: ('NEXO', 'nexo', None),
+    438: ('SUI', 'sui', None),
+    496: ('ENA', 'ethena', None),
+    569: ('POL', 'polygon-ecosystem-token', None),
+    635: ('XAUT', 'tether-gold', None),
 }
 
-async def get_swyftx_token():
-    """Get access token from Swyftx - EXACTLY like your working Python code"""
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{SWYFTX_API_URL}/auth/refresh/",
-            json={"apiKey": SWYFTX_API_KEY},
-            headers={"Content-Type": "application/json"},
-            timeout=10
-        )
-        response.raise_for_status()
-        return response.json().get("accessToken")
+# Asset colors for frontend
+ASSET_COLORS = {
+    'BTC': '#F7931A', 'ETH': '#627EEA', 'XRP': '#23292F',
+    'ADA': '#0033AD', 'SOL': '#9945FF', 'DOGE': '#C2A633',
+    'USDC': '#2775CA', 'AUD': '#FFCD00', 'USD': '#85BB65',
+    'LUNA': '#FF6B6B', 'NEXO': '#1A5AFF', 'SUI': '#4DA2FF',
+    'ENA': '#000000', 'POL': '#8247E5', 'XAUT': '#FFD700'
+}
 
 @app.get("/")
 async def root():
@@ -69,13 +73,20 @@ async def get_portfolio():
     try:
         if not SWYFTX_API_KEY:
             raise HTTPException(status_code=500, detail="SWYFTX_API_KEY not configured")
-        
-        # Step 1: Get token (EXACTLY like your working Python code)
-        token = await get_swyftx_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        
-        # Step 2: Get balances (EXACTLY like your working Python code)
+
+        # Step 1: Get Swyftx token (exactly like your working Python)
         async with httpx.AsyncClient() as client:
+            auth_resp = await client.post(
+                f"{SWYFTX_API_URL}/auth/refresh/",
+                json={"apiKey": SWYFTX_API_KEY},
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            auth_resp.raise_for_status()
+            token = auth_resp.json().get("accessToken")
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Step 2: Get balances (exactly like your working Python)
             balances_resp = await client.get(
                 f"{SWYFTX_API_URL}/user/balance/",
                 headers=headers,
@@ -83,49 +94,86 @@ async def get_portfolio():
             )
             balances_resp.raise_for_status()
             balances_data = balances_resp.json()
+
+        # Process balances
+        balances = {}
+        for b in balances_data:
+            asset_id = b.get('assetId')
+            available = float(b.get('availableBalance', 0))
+            if available > 0:
+                balances[asset_id] = available
+
+        # Step 3: Get prices from CoinGecko (exactly like your working Python)
+        cg_ids = []
+        for asset_id in balances.keys():
+            if asset_id in COIN_MAP and COIN_MAP[asset_id][2] is None:
+                cg_ids.append(COIN_MAP[asset_id][1])
         
-        # Process balances (matching your working logic)
+        prices = {}
+        if cg_ids:
+            cg_url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(set(cg_ids))}&vs_currencies=aud&include_24hr_change=true"
+            async with httpx.AsyncClient() as client:
+                cg_data = await client.get(cg_url, timeout=10)
+                cg_data.raise_for_status()
+                cg_prices = cg_data.json()
+
+            # Build price map
+            for asset_id, (code, cg_id, fixed_price) in COIN_MAP.items():
+                if fixed_price:
+                    prices[asset_id] = {'price': fixed_price, 'change': 0, 'code': code}
+                elif cg_id in cg_prices:
+                    prices[asset_id] = {
+                        'price': cg_prices[cg_id]['aud'],
+                        'change': cg_prices[cg_id].get('aud_24h_change', 0),
+                        'code': code
+                    }
+
+        # Step 4: Calculate portfolio (exactly like your working Python)
         assets = []
         total_aud = 0.0
         
-        for balance in balances_data:
-            asset_id = balance.get('assetId')
-            available = float(balance.get('availableBalance', 0))
-            
-            if available <= 0 or asset_id not in COIN_MAP:
+        for asset_id, balance in balances.items():
+            if asset_id not in COIN_MAP or asset_id not in prices:
                 continue
+                
+            code, _, _ = COIN_MAP[asset_id]
+            price = prices[asset_id]['price']
+            change = prices[asset_id]['change']
+            value = balance * price
             
-            coin_info = COIN_MAP[asset_id]
-            
-            # For now, use simple values (you can add CoinGecko later)
-            # This is placeholder logic - replace with real price lookup
             asset_data = {
                 "asset_id": asset_id,
-                "code": coin_info['code'],
-                "name": coin_info['name'],
-                "balance": available,
-                "aud_value": available * 100,  # Placeholder - replace with real price
-                "usd_value": available * 65,   # Placeholder
-                "change_24h": 0.0  # Placeholder
+                "code": code,
+                "name": code,  # You can expand this later
+                "balance": balance,
+                "aud_value": value,
+                "usd_value": value * 0.65,  # Approximate
+                "change_24h": change,
+                "color": ASSET_COLORS.get(code, '#666')
             }
             
             assets.append(asset_data)
-            total_aud += asset_data['aud_value']
-        
-        # Sort by value
+            total_aud += value
+
+        # Sort by value (highest first)
         assets.sort(key=lambda x: x['aud_value'], reverse=True)
-        
+
+        # Calculate total change
+        total_change = sum(a['aud_value'] * a['change_24h'] / 100 for a in assets)
+        portfolio_change_pct = (total_change / total_aud * 100) if total_aud > 0 else 0
+
         return {
             "total_aud_value": total_aud,
             "total_usd_value": total_aud * 0.65,
+            "total_change_24h": portfolio_change_pct,
             "assets": assets,
             "last_updated": datetime.utcnow().isoformat()
         }
-        
+
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=e.response.status_code,
-            detail=f"Swyftx API error: {str(e)}"
+            detail=f"API error: {str(e)}"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
