@@ -15,10 +15,11 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://portfolio-crypto-inky.vercel.app",
-        "https://portfolio-crypto-git-main-comfybear71.vercel.app",
-        "http://localhost:3000",
-    ],
+    "https://portfolio-crypto-inky.vercel.app",
+    "https://portfolio-crypto-git-main-comfybear71.vercel.app",
+    "https://flub.vercel.app",  # <-- ADD THIS
+    "http://localhost:3000",
+],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
