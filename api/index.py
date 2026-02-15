@@ -62,7 +62,7 @@ COIN_MAP = {
     53:  ('USDC', 'usd-coin',                  None),
     73:  ('DOGE', 'dogecoin',                  None),
     130: ('SOL',  'solana',                    None),
-    405: ('LUNA', 'terra-luna',                None),
+    405: ('LUNA', 'terra-luna-classic',                None),
     407: ('NEXO', 'nexo',                      None),
     438: ('SUI',  'sui',                       None),
     496: ('ENA',  'ethena',                    None),
